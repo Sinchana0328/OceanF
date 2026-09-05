@@ -1,0 +1,64 @@
+# ==============================
+# OceanF Git Ignore
+# ==============================
+
+# Scientific data files
+*.nc
+*.nc4
+*.h5
+*.hdf5
+*.grib
+*.grib2
+*.zarr
+
+# Raw data
+data/raw/
+
+# Processed scientific datasets
+data/processed/**/*.nc
+data/processed/**/*.nc4
+data/processed/**/*.h5
+data/processed/**/*.hdf5
+data/processed/**/*.zarr
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+.venv312/
+*.nc
+*.nc4
+*.h5
+*.hdf5
+*.grib
+*.grib2
+*.zarr
+data/raw/
+.ipynb_checkpoints/
+__pycache__/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Python packaging
+*.egg-info/
+dist/
+build/

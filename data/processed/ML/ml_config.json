@@ -1,0 +1,177 @@
+{
+    "project": "OceanF",
+    "domain": {
+        "latitude_min": 5.0,
+        "latitude_max": 30.0,
+        "longitude_min": 45.0,
+        "longitude_max": 105.0,
+        "resolution": 0.25
+    },
+    "time": {
+        "common_start": "2025-07-01",
+        "common_end": "2025-12-31",
+        "train_start": "2025-07-01",
+        "train_end": "2025-10-31",
+        "validation_start": "2025-11-01",
+        "validation_end": "2025-11-30",
+        "test_start": "2025-12-01",
+        "test_end": "2025-12-31"
+    },
+    "input_features": [
+        "sst",
+        "sss",
+        "sla",
+        "uo",
+        "vo",
+        "u_wind",
+        "v_wind"
+    ],
+    "target_variable": "thetao",
+    "target_depths_m": [
+        0,
+        5,
+        10,
+        20,
+        30,
+        50,
+        75,
+        100,
+        125,
+        150,
+        200,
+        300,
+        500,
+        700,
+        1000
+    ],
+    "normalization": {
+        "inputs": "training_period_mean_std",
+        "target": "training_period_mean_std_by_depth"
+    },
+    "missing_data": {
+        "input_missing_values": "filled_with_zero_after_normalization",
+        "input_validity_mask": "retained",
+        "target_missing_values": "retained",
+        "target_validity_mask": "retained",
+        "target_loss": "masked"
+    },
+    "spatial_harmonization": {
+        "method": "linear_interpolation",
+        "target_resolution": 0.25
+    },
+    "split_strategy": "chronological",
+    "input_statistics": {
+        "sst": {
+            "mean": 28.404751172075144,
+            "std": 1.7427263313473726,
+            "valid_count": 1442298
+        },
+        "sss": {
+            "mean": 34.659655095742465,
+            "std": 2.189792420229875,
+            "valid_count": 1397280
+        },
+        "sla": {
+            "mean": 0.12738135289244565,
+            "std": 0.10723959119567963,
+            "valid_count": 1451769
+        },
+        "uo": {
+            "mean": 0.1588513733072574,
+            "std": 0.2937418284697399,
+            "valid_count": 1386393
+        },
+        "vo": {
+            "mean": 0.004650773311948224,
+            "std": 0.2669647847422948,
+            "valid_count": 1386313
+        },
+        "u_wind": {
+            "mean": 2.4924159092564713,
+            "std": 3.554870127445177,
+            "valid_count": 2993943
+        },
+        "v_wind": {
+            "mean": 1.665999904794515,
+            "std": 3.3344021976510523,
+            "valid_count": 2993943
+        }
+    },
+    "target_statistics": {
+        "0.0": {
+            "mean": 28.486478805541992,
+            "std": 1.647882342338562,
+            "valid_count": 1423602
+        },
+        "5.0": {
+            "mean": 28.439313888549805,
+            "std": 1.6437081098556519,
+            "valid_count": 1423602
+        },
+        "10.0": {
+            "mean": 28.35964584350586,
+            "std": 1.624861240386963,
+            "valid_count": 1381167
+        },
+        "20.0": {
+            "mean": 28.195425033569336,
+            "std": 1.680830478668213,
+            "valid_count": 1348449
+        },
+        "30.0": {
+            "mean": 27.92906951904297,
+            "std": 1.8576892614364624,
+            "valid_count": 1310073
+        },
+        "50.0": {
+            "mean": 27.199153900146484,
+            "std": 2.3706166744232178,
+            "valid_count": 1247835
+        },
+        "75.0": {
+            "mean": 25.88762092590332,
+            "std": 2.7070159912109375,
+            "valid_count": 1203801
+        },
+        "100.0": {
+            "mean": 23.823781967163086,
+            "std": 2.5781302452087402,
+            "valid_count": 1178217
+        },
+        "125.0": {
+            "mean": 21.22629165649414,
+            "std": 2.3343842029571533,
+            "valid_count": 1173297
+        },
+        "150.0": {
+            "mean": 18.86280632019043,
+            "std": 2.2079293727874756,
+            "valid_count": 1165425
+        },
+        "200.0": {
+            "mean": 15.866110801696777,
+            "std": 1.9165180921554565,
+            "valid_count": 1153371
+        },
+        "300.0": {
+            "mean": 13.093189239501953,
+            "std": 1.3613154888153076,
+            "valid_count": 1143654
+        },
+        "500.0": {
+            "mean": 11.224234580993652,
+            "std": 1.1399486064910889,
+            "valid_count": 1122498
+        },
+        "700.0": {
+            "mean": 9.76867961883545,
+            "std": 1.1913039684295654,
+            "valid_count": 1104417
+        },
+        "1000.0": {
+            "mean": 7.705094814300537,
+            "std": 1.053051233291626,
+            "valid_count": 1072560
+        }
+    }
+}
