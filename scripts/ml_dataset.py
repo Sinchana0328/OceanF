@@ -33,14 +33,14 @@ Target depths:
     0, 5, 10, 20, 30, 50, 75, 100, 125, 150, 200, 300, 500, 700, 1000 m
 
 Temporal input:
-    7-day retrospective window
+    Configurable retrospective window from 1 to 7 days.
 
 Spatial sample:
     64 × 64 input tile
     32 × 32 target tile
 
 Input channels:
-    7 variables × 7 days = 49 channels
+    7 variables × history_days
 
 Target channels:
     15 depth levels
@@ -51,8 +51,12 @@ The loader uses the persistent harmonized NetCDF files created by
 scripts/spatial_harmonization.py.
 
 No interpolation is performed inside this loader.
-"""
 
+Samples whose complete 32×32 target region contains zero valid
+thetao cells are excluded from the dataset index. This prevents
+land-only or otherwise completely invalid target tiles from reaching
+the masked loss function.
+"""
 
 from __future__ import annotations
 
@@ -223,12 +227,10 @@ class OceanEmbedDataset(Dataset):
     Each sample contains:
 
         x:
-            shape = [49, 64, 64]
-
-            7 days × 7 surface variables
+            shape = [history_days * 7, 64, 64]
 
         x_mask:
-            shape = [49, 64, 64]
+            shape = [history_days * 7, 64, 64]
 
             1 where original input data are valid,
             0 where input data were missing.
@@ -248,6 +250,9 @@ class OceanEmbedDataset(Dataset):
 
         metadata:
             target date and tile information.
+
+    Samples with zero valid target cells in the complete 32×32
+    prediction region are excluded during dataset initialization.
     """
 
     def __init__(
@@ -338,11 +343,11 @@ class OceanEmbedDataset(Dataset):
         self.target_date_indices = self._build_split_indices()
 
         # -------------------------------------------------------------
-        # 7-day retrospective window.
+        # Retrospective window.
         #
         # A target at index i requires:
         #
-        #     i-6, i-5, ..., i
+        #     i-history_days+1, ..., i
         #
         # -------------------------------------------------------------
 
@@ -370,19 +375,42 @@ class OceanEmbedDataset(Dataset):
         self.tile_positions = self._build_tile_positions()
 
         if len(self.tile_positions) == 0:
-            raise ValueError("No valid 64×64 input tiles were generated.")
+            raise ValueError(
+                "No valid 64×64 input tiles were generated."
+            )
 
         # -------------------------------------------------------------
         # Normalization statistics.
-        #
-        # These are read from ml_config.json.
-        #
-        # A later verification step will independently confirm that
-        # these statistics were derived only from the training period.
         # -------------------------------------------------------------
 
         self.input_stats = self._load_input_statistics()
         self.target_stats = self._load_target_statistics()
+
+        # -------------------------------------------------------------
+        # Build the actual valid sample index.
+        #
+        # A sample is represented by:
+        #
+        #     (target-date-position, tile-position-index)
+        #
+        # Any sample whose complete 32×32 target region has zero
+        # finite thetao cells is excluded.
+        # -------------------------------------------------------------
+
+        self.sample_index = self._build_valid_sample_index()
+
+        if len(self.sample_index) == 0:
+            raise ValueError(
+                f"No valid {self.split} samples remain after "
+                "target-validity filtering."
+            )
+
+        self.invalid_target_samples = (
+            len(self.sample_date_indices) * len(self.tile_positions)
+            - len(self.sample_index)
+        )
+
+        self.valid_target_samples = len(self.sample_index)
 
         print()
         print("=" * 72)
@@ -398,14 +426,26 @@ class OceanEmbedDataset(Dataset):
             f"History days          : {self.history_days}"
         )
         print(
-            f"Input channels        : {self.history_days * len(INPUT_FEATURE_NAMES)}"
+            f"Input channels        : "
+            f"{self.history_days * len(INPUT_FEATURE_NAMES)}"
         )
         print(
-            f"Usable {self.history_days}-day samples  : "
+            f"Usable {self.history_days}-day target dates : "
             f"{len(self.sample_date_indices)}"
         )
+        print(
+            f"Tile positions        : "
+            f"{len(self.tile_positions)}"
+        )
+        print(
+            f"Valid target samples  : "
+            f"{self.valid_target_samples}"
+        )
+        print(
+            f"Excluded invalid     : "
+            f"{self.invalid_target_samples}"
+        )
         print(f"Tile stride           : {self.tile_stride}")
-        print(f"Number of tiles       : {len(self.tile_positions)}")
         print(
             f"Input shape/sample    : "
             f"[{self.history_days * len(INPUT_FEATURE_NAMES)}, "
@@ -437,7 +477,10 @@ class OceanEmbedDataset(Dataset):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _find_variable(ds: NetCDFDataset, feature: str) -> str:
+    def _find_variable(
+        ds: NetCDFDataset,
+        feature: str,
+    ) -> str:
 
         candidates = VARIABLE_CANDIDATES[feature]
 
@@ -475,7 +518,10 @@ class OceanEmbedDataset(Dataset):
     # -----------------------------------------------------------------
 
     @staticmethod
-    def _get_coordinate(ds: NetCDFDataset, names: List[str]) -> np.ndarray:
+    def _get_coordinate(
+        ds: NetCDFDataset,
+        names: List[str],
+    ) -> np.ndarray:
 
         for name in names:
             if name in ds.variables:
@@ -486,7 +532,9 @@ class OceanEmbedDataset(Dataset):
         )
 
     @staticmethod
-    def _get_time_coordinate(ds: NetCDFDataset) -> np.ndarray:
+    def _get_time_coordinate(
+        ds: NetCDFDataset,
+    ) -> np.ndarray:
 
         if "time" in ds.variables:
             return np.asarray(ds.variables["time"][:])
@@ -713,7 +761,7 @@ class OceanEmbedDataset(Dataset):
         """
         Use the harmonized file dates.
 
-        All six harmonized datasets were generated on the common
+        The six harmonized datasets share the common
         2025-07-01 through 2025-12-31 period.
         """
 
@@ -855,10 +903,98 @@ class OceanEmbedDataset(Dataset):
         return positions
 
     # -----------------------------------------------------------------
+    # VALID TARGET SAMPLE INDEX
+    # -----------------------------------------------------------------
+
+    def _build_valid_sample_index(
+        self,
+    ) -> List[Tuple[int, int]]:
+        """
+        Build the flattened sample index using target validity.
+
+        Each returned tuple is:
+
+            (date_sample_position, tile_position_index)
+
+        A sample is included only if its complete 32×32 target region
+        contains at least one finite thetao value.
+
+        This filtering is performed on the target data itself, before
+        any normalization, so land-only or completely missing target
+        regions cannot enter the training/evaluation loop.
+        """
+
+        target_path = DATA_FILES[TARGET_VARIABLE]
+        target_ds = self._datasets[target_path]
+        target_variable = target_ds.variables[
+            self.variable_names[TARGET_VARIABLE]
+        ]
+
+        valid_samples: List[Tuple[int, int]] = []
+
+        total_candidates = (
+            len(self.sample_date_indices)
+            * len(self.tile_positions)
+        )
+
+        checked = 0
+
+        for date_sample_position, target_time_index in enumerate(
+            self.sample_date_indices
+        ):
+
+            # Read one complete target day once, then inspect all
+            # spatial tiles from that in-memory array.
+            target_day = np.asarray(
+                target_variable[
+                    target_time_index,
+                    :,
+                    :,
+                    :,
+                ],
+                dtype=np.float32,
+            )
+
+            finite_target = np.isfinite(target_day)
+
+            for tile_index, (tile_row, tile_col) in enumerate(
+                self.tile_positions
+            ):
+
+                target_row = tile_row + CONTEXT
+                target_col = tile_col + CONTEXT
+
+                target_mask_patch = finite_target[
+                    :,
+                    target_row : target_row + OUTPUT_TILE_SIZE,
+                    target_col : target_col + OUTPUT_TILE_SIZE,
+                ]
+
+                if bool(target_mask_patch.any()):
+                    valid_samples.append(
+                        (
+                            date_sample_position,
+                            tile_index,
+                        )
+                    )
+
+                checked += 1
+
+        if checked != total_candidates:
+            raise RuntimeError(
+                "Internal error while building target-validity "
+                "sample index."
+            )
+
+        return valid_samples
+
+    # -----------------------------------------------------------------
     # NORMALIZATION STATISTICS
     # -----------------------------------------------------------------
 
-    def _load_input_statistics(self) -> Dict[str, Tuple[float, float]]:
+    def _load_input_statistics(
+        self,
+    ) -> Dict[str, Tuple[float, float]]:
 
         stats = self.config.get("input_statistics")
 
@@ -923,7 +1059,7 @@ class OceanEmbedDataset(Dataset):
         return result
 
     # -----------------------------------------------------------------
-    # READ SINGLE VARIABLE
+    # READ SINGLE INPUT VARIABLE
     # -----------------------------------------------------------------
 
     def _read_input_day(
@@ -960,7 +1096,10 @@ class OceanEmbedDataset(Dataset):
                 0.0,
             ).astype(np.float32)
 
-            return normalized, valid_mask.astype(np.float32)
+            return (
+                normalized,
+                valid_mask.astype(np.float32),
+            )
 
         else:
 
@@ -970,7 +1109,10 @@ class OceanEmbedDataset(Dataset):
                 0.0,
             ).astype(np.float32)
 
-            return array, valid_mask.astype(np.float32)
+            return (
+                array,
+                valid_mask.astype(np.float32),
+            )
 
     # -----------------------------------------------------------------
     # READ TARGET
@@ -1033,10 +1175,7 @@ class OceanEmbedDataset(Dataset):
 
     def __len__(self) -> int:
 
-        return (
-            len(self.sample_date_indices)
-            * len(self.tile_positions)
-        )
+        return len(self.sample_index)
 
     # -----------------------------------------------------------------
     # DATASET GETITEM
@@ -1054,13 +1193,10 @@ class OceanEmbedDataset(Dataset):
             )
 
         # -------------------------------------------------------------
-        # Decode flattened sample index.
+        # Decode filtered sample index.
         # -------------------------------------------------------------
 
-        num_tiles = len(self.tile_positions)
-
-        date_sample_index = index // num_tiles
-        tile_index = index % num_tiles
+        date_sample_index, tile_index = self.sample_index[index]
 
         target_time_index = self.sample_date_indices[
             date_sample_index
@@ -1069,20 +1205,17 @@ class OceanEmbedDataset(Dataset):
         tile_row, tile_col = self.tile_positions[tile_index]
 
         # -------------------------------------------------------------
-        # Build 7-day × 7-feature input.
+        # Build retrospective input.
         #
         # Channel order:
         #
-        # day -6:
-        #   sst, sss, sla, uo, vo, u_wind, v_wind
+        # For each chronological day:
         #
-        # day -5:
-        #   ...
+        #     sst, sss, sla, uo, vo, u_wind, v_wind
         #
-        # day  0:
-        #   ...
+        # Total:
         #
-        # Total = 49 channels.
+        #     history_days × 7 channels
         # -------------------------------------------------------------
 
         input_channels = []
@@ -1152,6 +1285,15 @@ class OceanEmbedDataset(Dataset):
             target_col : target_col + OUTPUT_TILE_SIZE,
         ]
 
+        # Safety assertion:
+        # the sample index was constructed to guarantee at least one
+        # valid target cell.
+        if not bool(y_mask.any()):
+            raise RuntimeError(
+                "Dataset sample index inconsistency: a sample with "
+                "zero valid target cells was selected."
+            )
+
         # -------------------------------------------------------------
         # Convert to PyTorch tensors.
         # -------------------------------------------------------------
@@ -1177,6 +1319,9 @@ class OceanEmbedDataset(Dataset):
                     INPUT_FEATURE_NAMES
                 ),
                 "target_depths_m": TARGET_DEPTHS.tolist(),
+                "valid_target_cells": int(
+                    y_mask_tensor.sum().item()
+                ),
             }
 
             return (
@@ -1260,6 +1405,7 @@ def smoke_test(history_days: int = 7):
         print(
             f"x dtype      : {x.dtype}"
         )
+
         print(
             f"y dtype      : {y.dtype}"
         )
@@ -1269,9 +1415,12 @@ def smoke_test(history_days: int = 7):
             f"{bool(torch.isfinite(x).all())}"
         )
 
-        # y is allowed to contain NaN because target missingness is
-        # intentionally retained for masked loss.
         valid_y = y_mask > 0
+
+        print(
+            f"y has valid cells: "
+            f"{bool(valid_y.any())}"
+        )
 
         if valid_y.any():
             print(
@@ -1300,6 +1449,11 @@ def smoke_test(history_days: int = 7):
             f"tile        : "
             f"row={metadata['tile_row']}, "
             f"col={metadata['tile_col']}"
+        )
+
+        print(
+            f"valid target cells: "
+            f"{metadata['valid_target_cells']}"
         )
 
         dataset.close()
