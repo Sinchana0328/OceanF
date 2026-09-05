@@ -256,6 +256,7 @@ class OceanEmbedDataset(Dataset):
         tile_stride: int = 32,
         return_metadata: bool = False,
         normalize: bool = True,
+        history_days: int = 7,
     ):
         super().__init__()
 
@@ -263,6 +264,12 @@ class OceanEmbedDataset(Dataset):
         self.tile_stride = int(tile_stride)
         self.return_metadata = return_metadata
         self.normalize = normalize
+        self.history_days = int(history_days)
+
+        if self.history_days < 1 or self.history_days > 7:
+            raise ValueError(
+                "history_days must be between 1 and 7."
+            )
 
         if self.split not in {"train", "validation", "test"}:
             raise ValueError(
@@ -343,7 +350,7 @@ class OceanEmbedDataset(Dataset):
 
         for target_index in self.target_date_indices:
 
-            window_start = target_index - WINDOW_SIZE + 1
+            window_start = target_index - self.history_days + 1
 
             if window_start < 0:
                 continue
@@ -353,7 +360,7 @@ class OceanEmbedDataset(Dataset):
         if len(self.sample_date_indices) == 0:
             raise ValueError(
                 f"No usable {self.split} samples after applying "
-                f"{WINDOW_SIZE}-day retrospective window."
+                f"{self.history_days}-day retrospective window."
             )
 
         # -------------------------------------------------------------
@@ -388,14 +395,21 @@ class OceanEmbedDataset(Dataset):
             f"{len(self.target_date_indices)}"
         )
         print(
-            f"Usable 7-day samples  : "
+            f"History days          : {self.history_days}"
+        )
+        print(
+            f"Input channels        : {self.history_days * len(INPUT_FEATURE_NAMES)}"
+        )
+        print(
+            f"Usable {self.history_days}-day samples  : "
             f"{len(self.sample_date_indices)}"
         )
         print(f"Tile stride           : {self.tile_stride}")
         print(f"Number of tiles       : {len(self.tile_positions)}")
         print(
             f"Input shape/sample    : "
-            f"[49, {INPUT_TILE_SIZE}, {INPUT_TILE_SIZE}]"
+            f"[{self.history_days * len(INPUT_FEATURE_NAMES)}, "
+            f"{INPUT_TILE_SIZE}, {INPUT_TILE_SIZE}]"
         )
         print(
             f"Target shape/sample   : "
@@ -1075,7 +1089,7 @@ class OceanEmbedDataset(Dataset):
         input_masks = []
 
         window_start = (
-            target_time_index - WINDOW_SIZE + 1
+            target_time_index - self.history_days + 1
         )
 
         for time_index in range(
@@ -1157,7 +1171,8 @@ class OceanEmbedDataset(Dataset):
                 "tile_col": int(tile_col),
                 "input_tile_size": INPUT_TILE_SIZE,
                 "output_tile_size": OUTPUT_TILE_SIZE,
-                "window_size": WINDOW_SIZE,
+                "window_size": self.history_days,
+                "history_days": self.history_days,
                 "input_features": list(
                     INPUT_FEATURE_NAMES
                 ),
@@ -1207,7 +1222,7 @@ class OceanEmbedDataset(Dataset):
 # ---------------------------------------------------------------------
 
 
-def smoke_test():
+def smoke_test(history_days: int = 7):
 
     print()
     print("=" * 72)
@@ -1224,6 +1239,7 @@ def smoke_test():
             tile_stride=32,
             return_metadata=True,
             normalize=True,
+            history_days=history_days,
         )
 
         print(f"Dataset length: {len(dataset)}")
@@ -1299,4 +1315,21 @@ def smoke_test():
 # ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    smoke_test()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="OceanEmbed ML dataset smoke test"
+    )
+
+    parser.add_argument(
+        "--history-days",
+        type=int,
+        default=7,
+        choices=range(1, 8),
+        metavar="{1..7}",
+        help="Number of retrospective input days (default: 7).",
+    )
+
+    args = parser.parse_args()
+
+    smoke_test(history_days=args.history_days)

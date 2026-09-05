@@ -1,4 +1,4 @@
-"""
+﻿"""
 OceanEmbed Training Engine
 ==========================
 
@@ -159,6 +159,15 @@ def parse_args():
         type=int,
         default=DEFAULT_TILE_STRIDE,
         help="Spatial tile stride.",
+    )
+
+    parser.add_argument(
+        "--history-days",
+        type=int,
+        default=7,
+        choices=range(1, 8),
+        metavar="{1..7}",
+        help="Number of retrospective input days.",
     )
 
     parser.add_argument(
@@ -674,6 +683,14 @@ def run_training(
         f"{args.max_validation_batches}"
     )
 
+    print(
+        f"History days: {args.history_days}"
+    )
+
+    print(
+        f"Input channels: {args.history_days * 7}"
+    )
+
     # ------------------------------------------------------------------------
     # Create datasets.
     # ------------------------------------------------------------------------
@@ -686,6 +703,7 @@ def run_training(
         tile_stride=args.tile_stride,
         return_metadata=True,
         normalize=True,
+        history_days=args.history_days,
     )
 
     print()
@@ -696,6 +714,7 @@ def run_training(
         tile_stride=args.tile_stride,
         return_metadata=True,
         normalize=True,
+        history_days=args.history_days,
     )
 
     # ------------------------------------------------------------------------
@@ -725,7 +744,13 @@ def run_training(
     print()
     print("Creating OceanEmbed-CNN...")
 
-    model = OceanEmbedCNN()
+    input_channels = args.history_days * 7
+
+    model = OceanEmbedCNN(
+    input_channels=input_channels,
+    latent_channels=128,
+    output_channels=15,
+)
 
     model = model.to(device)
 

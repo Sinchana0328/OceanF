@@ -585,6 +585,7 @@ def run_evaluation(
     batch_size: int,
     max_batches: Optional[int],
     seed: int,
+    history_days: int,
 ) -> dict:
     """Run evaluation on the selected split."""
 
@@ -643,6 +644,7 @@ def run_evaluation(
     dataset = OceanEmbedDataset(
         split=split,
         tile_stride=32,
+        history_days=history_days,
     )
 
     loader = DataLoader(
@@ -662,8 +664,10 @@ def run_evaluation(
         "Creating OceanEmbed-CNN..."
     )
 
+    input_channels = history_days * 7
+
     model = OceanEmbedCNN(
-        input_channels=49,
+        input_channels=input_channels,
         output_channels=15,
         latent_channels=128,
     )
@@ -1224,6 +1228,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--history-days",
+        type=int,
+        choices=range(1, 8),
+        default=7,
+        help="Number of retrospective input days.",
+    )
+
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         default=DEFAULT_CHECKPOINT,
@@ -1301,6 +1313,7 @@ def main() -> None:
         batch_size=args.batch_size,
         max_batches=args.max_batches,
         seed=args.seed,
+        history_days=args.history_days,
     )
 
 
