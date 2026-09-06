@@ -901,11 +901,9 @@ def run_evaluation(
         exist_ok=True,
     )
 
-    output_path = (
-        RESULTS_DIR
-        / f"{split}_evaluation.json"
-    )
-
+    checkpoint_seed = checkpoint_path.stem.split("_seed")[-1] if "_seed" in checkpoint_path.stem else "unknown"
+    output_path = RESULTS_DIR / split / f"seed{checkpoint_seed}_{split}_evaluation.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open(
         "w",
         encoding="utf-8",
@@ -1319,4 +1317,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 

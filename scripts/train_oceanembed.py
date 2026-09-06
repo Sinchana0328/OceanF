@@ -17,6 +17,7 @@ This script supports:
     - Best-checkpoint saving
     - Training history
     - Development smoke runs
+    - Training and validation timing
 
 IMPORTANT
 ---------
@@ -33,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -684,11 +686,11 @@ def run_training(
     )
 
     print(
-        f"History days: {args.history_days}"
+        f"History days          : {args.history_days}"
     )
 
     print(
-        f"Input channels: {args.history_days * 7}"
+        f"Input channels        : {args.history_days * 7}"
     )
 
     # ------------------------------------------------------------------------
@@ -746,11 +748,15 @@ def run_training(
 
     input_channels = args.history_days * 7
 
+    latent_channels = 128
+
+    output_channels = 15
+
     model = OceanEmbedCNN(
-    input_channels=input_channels,
-    latent_channels=128,
-    output_channels=15,
-)
+        input_channels=input_channels,
+        latent_channels=latent_channels,
+        output_channels=output_channels,
+    )
 
     model = model.to(device)
 
@@ -811,6 +817,49 @@ def run_training(
         / args.checkpoint_name
     )
 
+    history_path = (
+        CHECKPOINT_DIR
+        / "oceanembed_training_history.json"
+    )
+
+    # ------------------------------------------------------------------------
+    # Complete experiment configuration.
+    #
+    # This configuration is stored inside every best checkpoint so that
+    # the exact experiment can be reconstructed later.
+    # ------------------------------------------------------------------------
+
+    checkpoint_config = {
+        "project": "OceanF",
+        "experiment": "OceanEmbed-CNN",
+        "experiment_variant": (
+            "E2_7day_retrospective"
+            if args.history_days == 7
+            else f"E{args.history_days}_history_{args.history_days}day"
+        ),
+        "seed": args.seed,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "epochs": args.epochs,
+        "tile_stride": args.tile_stride,
+        "history_days": args.history_days,
+        "input_channels": input_channels,
+        "latent_channels": latent_channels,
+        "output_channels": output_channels,
+        "gradient_clip": args.gradient_clip,
+        "num_workers": args.num_workers,
+        "patience": args.patience,
+        "max_train_batches": args.max_train_batches,
+        "max_validation_batches": args.max_validation_batches,
+        "loss": "masked_huber",
+        "huber_delta": 1.0,
+        "optimizer": "Adam",
+        "normalization": "training_period_mean_std",
+        "train_samples": len(train_dataset),
+        "validation_samples": len(validation_dataset),
+        "model_parameters": parameter_count,
+    }
+
     # ------------------------------------------------------------------------
     # Epoch loop.
     # ------------------------------------------------------------------------
@@ -819,6 +868,8 @@ def run_training(
         1,
         args.epochs + 1,
     ):
+
+        epoch_start_time = time.perf_counter()
 
         print()
         print("=" * 72)
@@ -831,6 +882,8 @@ def run_training(
         # Training.
         # --------------------------------------------------------------------
 
+        train_start_time = time.perf_counter()
+
         train_metrics = train_one_epoch(
             model=model,
             loader=train_loader,
@@ -841,6 +894,14 @@ def run_training(
             max_batches=args.max_train_batches,
         )
 
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        train_elapsed_seconds = (
+            time.perf_counter()
+            - train_start_time
+        )
+
         global_step += int(
             train_metrics["batches"]
         )
@@ -849,12 +910,103 @@ def run_training(
         # Validation.
         # --------------------------------------------------------------------
 
+        validation_start_time = time.perf_counter()
+
         validation_metrics = validate_one_epoch(
             model=model,
             loader=validation_loader,
             criterion=criterion,
             device=device,
             max_batches=args.max_validation_batches,
+        )
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+        validation_elapsed_seconds = (
+            time.perf_counter()
+            - validation_start_time
+        )
+
+        epoch_elapsed_seconds = (
+            time.perf_counter()
+            - epoch_start_time
+        )
+
+        # --------------------------------------------------------------------
+        # Calculate throughput.
+        # --------------------------------------------------------------------
+
+        train_batches = train_metrics["batches"]
+
+        validation_batches = validation_metrics["batches"]
+
+        train_samples_processed = (
+            train_batches * args.batch_size
+        )
+
+        validation_samples_processed = (
+            validation_batches * args.batch_size
+        )
+
+        train_batches_per_second = (
+            train_batches / train_elapsed_seconds
+            if train_elapsed_seconds > 0
+            else 0.0
+        )
+
+        train_samples_per_second = (
+            train_samples_processed / train_elapsed_seconds
+            if train_elapsed_seconds > 0
+            else 0.0
+        )
+
+        validation_batches_per_second = (
+            validation_batches / validation_elapsed_seconds
+            if validation_elapsed_seconds > 0
+            else 0.0
+        )
+
+        validation_samples_per_second = (
+            validation_samples_processed
+            / validation_elapsed_seconds
+            if validation_elapsed_seconds > 0
+            else 0.0
+        )
+
+        # --------------------------------------------------------------------
+        # Print timing.
+        # --------------------------------------------------------------------
+
+        print()
+        print("TIMING")
+        print(
+            f"  Training time       : "
+            f"{train_elapsed_seconds:.3f} seconds"
+        )
+        print(
+            f"  Validation time     : "
+            f"{validation_elapsed_seconds:.3f} seconds"
+        )
+        print(
+            f"  Total epoch time    : "
+            f"{epoch_elapsed_seconds:.3f} seconds"
+        )
+        print(
+            f"  Train batches/sec   : "
+            f"{train_batches_per_second:.3f}"
+        )
+        print(
+            f"  Train samples/sec   : "
+            f"{train_samples_per_second:.3f}"
+        )
+        print(
+            f"  Validation batches/sec: "
+            f"{validation_batches_per_second:.3f}"
+        )
+        print(
+            f"  Validation samples/sec: "
+            f"{validation_samples_per_second:.3f}"
         )
 
         # --------------------------------------------------------------------
@@ -912,15 +1064,19 @@ def run_training(
             "global_step": global_step,
             "train": train_metrics,
             "validation": validation_metrics,
+            "timing": {
+                "training_seconds": train_elapsed_seconds,
+                "validation_seconds": validation_elapsed_seconds,
+                "epoch_seconds": epoch_elapsed_seconds,
+                "train_batches_per_second": train_batches_per_second,
+                "train_samples_per_second": train_samples_per_second,
+                "validation_batches_per_second": validation_batches_per_second,
+                "validation_samples_per_second": validation_samples_per_second,
+            },
         }
 
         history.append(
             epoch_record
-        )
-
-        history_path = (
-            CHECKPOINT_DIR
-            / "oceanembed_training_history.json"
         )
 
         save_training_history(
@@ -958,20 +1114,22 @@ def run_training(
                 metrics={
                     "train": train_metrics,
                     "validation": validation_metrics,
+                    "timing": {
+                        "training_seconds": train_elapsed_seconds,
+                        "validation_seconds": validation_elapsed_seconds,
+                        "epoch_seconds": epoch_elapsed_seconds,
+                        "train_batches_per_second": train_batches_per_second,
+                        "train_samples_per_second": train_samples_per_second,
+                        "validation_batches_per_second": validation_batches_per_second,
+                        "validation_samples_per_second": validation_samples_per_second,
+                    },
                 },
-                config={
-                    "seed": args.seed,
-                    "batch_size": args.batch_size,
-                    "learning_rate": args.learning_rate,
-                    "epochs": args.epochs,
-                    "tile_stride": args.tile_stride,
-                    "gradient_clip": args.gradient_clip,
-                },
+                config=checkpoint_config,
             )
 
             print()
             print(
-                f"BEST CHECKPOINT SAVED:"
+                "BEST CHECKPOINT SAVED:"
             )
             print(
                 f"  {checkpoint}"
