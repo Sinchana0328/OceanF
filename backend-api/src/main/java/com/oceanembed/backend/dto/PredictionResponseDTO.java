@@ -1,48 +1,108 @@
 package com.oceanembed.backend.dto;
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.*;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 
-/**
- * Contract the frontend (React) sends to Spring Boot's /api/v1/predictions endpoint.
- */
-public class PredictionRequestDTO {
+public class PredictionResponseDTO {
 
-    @NotNull
-    @DecimalMin(value = "-90.0")
-    @DecimalMax(value = "90.0")
+    private Long jobId;
+    private String status;
     private Double latitude;
-
-    @NotNull
-    @DecimalMin(value = "-180.0")
-    @DecimalMax(value = "180.0")
     private Double longitude;
-
-    @NotNull
     private LocalDate date;
+    private String modelVersion;
+    private Double gridResolutionDeg;
+    private Instant createdAt;
+    private Instant completedAt;
+    private String errorMessage;
+    private List<DepthPredictionDTO> predictions;
 
-    /** Optional human-readable region label, e.g. "Arabian Sea" */
-    private String regionName;
+    public Long getJobId() {
+        return jobId;
+    }
 
-    @NotNull
-    @Valid
-    private SurfaceVariablesDTO surface;
+    public void setJobId(Long jobId) {
+        this.jobId = jobId;
+    }
 
-    /** Requested depth levels in meters. Defaults applied server-side if omitted. */
-    private List<@Min(0) @Max(2000) Integer> depths;
+    public String getStatus() {
+        return status;
+    }
 
-    public Double getLatitude() { return latitude; }
-    public void setLatitude(Double latitude) { this.latitude = latitude; }
-    public Double getLongitude() { return longitude; }
-    public void setLongitude(Double longitude) { this.longitude = longitude; }
-    public LocalDate getDate() { return date; }
-    public void setDate(LocalDate date) { this.date = date; }
-    public String getRegionName() { return regionName; }
-    public void setRegionName(String regionName) { this.regionName = regionName; }
-    public SurfaceVariablesDTO getSurface() { return surface; }
-    public void setSurface(SurfaceVariablesDTO surface) { this.surface = surface; }
-    public List<Integer> getDepths() { return depths; }
-    public void setDepths(List<Integer> depths) { this.depths = depths; }
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public Double getLatitude() {
+        return latitude;
+    }
+
+    public void setLatitude(Double latitude) {
+        this.latitude = latitude;
+    }
+
+    public Double getLongitude() {
+        return longitude;
+    }
+
+    public void setLongitude(Double longitude) {
+        this.longitude = longitude;
+    }
+
+    public LocalDate getDate() {
+        return date;
+    }
+
+    public void setDate(LocalDate date) {
+        this.date = date;
+    }
+
+    public String getModelVersion() {
+        return modelVersion;
+    }
+
+    public void setModelVersion(String modelVersion) {
+        this.modelVersion = modelVersion;
+    }
+
+    public Double getGridResolutionDeg() {
+        return gridResolutionDeg;
+    }
+
+    public void setGridResolutionDeg(Double gridResolutionDeg) {
+        this.gridResolutionDeg = gridResolutionDeg;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Instant getCompletedAt() {
+        return completedAt;
+    }
+
+    public void setCompletedAt(Instant completedAt) {
+        this.completedAt = completedAt;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public List<DepthPredictionDTO> getPredictions() {
+        return predictions;
+    }
+
+    public void setPredictions(List<DepthPredictionDTO> predictions) {
+        this.predictions = predictions;
+    }
 }
