@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import sys
 from pathlib import Path
 from typing import List
@@ -7,119 +7,191 @@ import numpy as np
 import torch
 
 from app.config import settings
+from app.data import OceanEmbedDataLoader
 from app.schemas import DepthPrediction, PredictionRequest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
-from scripts.inference.oceanembed_inference import DEPTHS_M, OceanEmbedEnsemble
+from scripts.inference.oceanembed_inference import (
+    DEPTHS_M,
+    HISTORY_DAYS,
+    INPUT_CHANNELS,
+    INPUT_HEIGHT,
+    INPUT_WIDTH,
+    OUTPUT_CHANNELS,
+    OUTPUT_HEIGHT,
+    OUTPUT_WIDTH,
+    INPUT_FEATURES,
+    OceanEmbedEnsemble,
+)
 
 logger = logging.getLogger("oceanembed.model")
 
-FEATURE_NAMES = (
-    "sst",
-    "sss",
-    "sla",
-    "uo",
-    "vo",
-    "u_wind",
-    "v_wind",
-)
-
-HISTORY_DAYS = 7
-INPUT_SIZE = 64
-INPUT_CHANNELS = HISTORY_DAYS * len(FEATURE_NAMES)
-OUTPUT_CHANNELS = 15
-OUTPUT_SIZE = 32
-
 
 class OceanEmbedModel:
-    """
-    Wrapper around the OceanEmbed subsurface temperature reconstruction model.
-
-    Reference approach (from the research papers this service is built against):
-      - Subsurface Temperature Reconstruction for the Global Ocean from 1993-2020
-        Using Satellite Observations and Deep Learning (MDPI Remote Sensing 14(13):3198)
-      - A Deep Learning Method for Inversing 3D Temperature Fields Using Sea Surface
-        Data in Offshore China and the Northwest Pacific Ocean (MDPI JMSE 12(12):2337)
-
-        This wrapper owns service integration only. OceanEmbedEnsemble owns the
-        model architecture, normalization, checkpoint loading, and inference.
-    """
+    """Service wrapper around the existing validated OceanEmbed V1 ensemble."""
 
     def __init__(self):
         self.model_version = settings.model_version
         self.loaded = False
         self._ensemble: OceanEmbedEnsemble | None = None
+        self._data: OceanEmbedDataLoader | None = None
 
     def load(self) -> None:
+        self.loaded = False
+        self._ensemble = None
+        if self._data is not None:
+            self._data.close()
+        self._data = None
+
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            # OceanEmbedEnsemble is the source of truth for:
+            # architecture, V1 config/statistics, checkpoint loading,
+            # normalization and three-seed inference.
             self._ensemble = OceanEmbedEnsemble(device=device)
+
+            # Fail startup if the real harmonized data are unavailable.
+            self._data = OceanEmbedDataLoader()
+
             self.loaded = True
-            logger.info("OceanEmbed ensemble '%s' loaded on %s", self.model_version, device)
-        except Exception as exc:
-            logger.exception("Failed to load OceanEmbed checkpoints: %s", exc)
+            logger.info(
+                "OceanEmbed V1 ensemble and real harmonized data loaded on %s",
+                device,
+            )
+        except Exception:
+            logger.exception("Failed to load real OceanEmbed inference resources")
+            if self._data is not None:
+                self._data.close()
+            self._data = None
             self._ensemble = None
             self.loaded = False
 
     def predict(self, request: PredictionRequest) -> List[DepthPrediction]:
-        if not self.loaded or self._ensemble is None:
-            raise RuntimeError("Model is not loaded")
+        if not self.loaded or self._ensemble is None or self._data is None:
+            raise RuntimeError("Real OceanEmbed model/data are not loaded")
 
-        feature_values = {
-            "sst": request.surface.sst,
-            "sss": request.surface.sss,
-            "sla": request.surface.ssh,
-            "uo": 0.0,
-            "vo": 0.0,
-            "u_wind": request.surface.wind_u or 0.0,
-            "v_wind": request.surface.wind_v or 0.0,
-        }
+        feature_arrays, metadata = self._data.get_window(
+            request.date,
+            request.latitude,
+            request.longitude,
+        )
 
-        feature_arrays = {
-            feature: np.full(
-                (HISTORY_DAYS, INPUT_SIZE, INPUT_SIZE),
-                value,
-                dtype=np.float32,
+        # This is the authoritative V1 preprocessing path.
+        normalized_input = self._ensemble.normalize_input_window(feature_arrays)
+        if tuple(normalized_input.shape) != (
+            INPUT_CHANNELS,
+            INPUT_HEIGHT,
+            INPUT_WIDTH,
+        ):
+            raise RuntimeError(
+                f"Unexpected normalized input shape: {tuple(normalized_input.shape)}"
             )
-            for feature, value in feature_values.items()
-        }
 
-        prediction = self._ensemble.predict_from_raw_window(feature_arrays)
+        if not torch.isfinite(normalized_input).all().item():
+            raise RuntimeError("Normalized OceanEmbed input contains non-finite values")
+
+        logger.info(
+            "OceanEmbed input: shape=%s date=%s window=%s..%s tile=(%s,%s) "
+            "grid=(%.2f,%.2f)",
+            tuple(normalized_input.shape),
+            metadata["target_date"],
+            metadata["window_start"],
+            metadata["window_end"],
+            metadata["tile_row"],
+            metadata["tile_col"],
+            metadata["snapped_latitude"],
+            metadata["snapped_longitude"],
+        )
+
+        # Verified interface in scripts/inference/oceanembed_inference.py.
+        prediction = self._ensemble.predict_single(normalized_input)
+
+        expected_output = (
+            OUTPUT_CHANNELS,
+            OUTPUT_HEIGHT,
+            OUTPUT_WIDTH,
+        )
+        if tuple(prediction.shape) != expected_output:
+            raise RuntimeError(
+                f"Unexpected OceanEmbed output shape: {tuple(prediction.shape)}; "
+                f"expected {expected_output}"
+            )
+        if not torch.isfinite(prediction).all().item():
+            raise RuntimeError("OceanEmbed prediction contains non-finite values")
+
+        row = int(metadata["output_row"])
+        col = int(metadata["output_col"])
         prediction_array = prediction.detach().cpu().numpy()
-        return [
-            DepthPrediction(
-                depth_m=depth,
-                temperature_c=round(
-                    float(prediction_array[depth_index, 16, 16]),
-                    3,
-                ),
+
+        depth_to_index = {depth: i for i, depth in enumerate(DEPTHS_M)}
+        results: list[DepthPrediction] = []
+
+        for depth in request.depths:
+            if depth not in depth_to_index:
+                raise ValueError(
+                    f"Unsupported depth {depth}m. Supported depths: {DEPTHS_M}"
+                )
+            depth_index = depth_to_index[depth]
+            results.append(
+                DepthPrediction(
+                    depth_m=depth,
+                    temperature_c=round(
+                        float(prediction_array[depth_index, row, col]),
+                        3,
+                    ),
+                    uncertainty_c=None,
+                )
             )
-            for depth in request.depths
-            for depth_index, trained_depth in enumerate(DEPTHS_M)
-            if trained_depth == depth
-        ]
+
+        logger.info(
+            "OceanEmbed output: shape=%s requested_depths=%s",
+            tuple(prediction.shape),
+            request.depths,
+        )
+        return results
 
     @torch.no_grad()
     def predict_input(self, model_input: torch.Tensor | np.ndarray) -> np.ndarray:
-        """Run real inference for a normalized [49, 64, 64] input window."""
+        """Run the verified ensemble on a normalized [49,64,64] tensor."""
         if not self.loaded or self._ensemble is None:
             raise RuntimeError("Model is not loaded")
 
         tensor = torch.as_tensor(model_input, dtype=torch.float32)
-        if tuple(tensor.shape) != (INPUT_CHANNELS, INPUT_SIZE, INPUT_SIZE):
+        if tuple(tensor.shape) != (INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH):
             raise ValueError(
-                f"Expected model input shape {(INPUT_CHANNELS, INPUT_SIZE, INPUT_SIZE)}, "
+                f"Expected model input shape "
+                f"{(INPUT_CHANNELS, INPUT_HEIGHT, INPUT_WIDTH)}, "
                 f"got {tuple(tensor.shape)}"
             )
 
         prediction = self._ensemble.predict_single(tensor)
         result = prediction.detach().cpu().numpy()
-        if result.shape != (OUTPUT_CHANNELS, OUTPUT_SIZE, OUTPUT_SIZE):
+        if result.shape != (OUTPUT_CHANNELS, OUTPUT_HEIGHT, OUTPUT_WIDTH):
             raise RuntimeError(f"Unexpected prediction shape: {result.shape}")
         return result
+
+    def get_model_info(self) -> dict:
+        return {
+            "project": "OceanF",
+            "experiment": "OceanEmbed-CNN",
+            "experiment_variant": "E2_7day_retrospective",
+            "checkpoint_version": "V1",
+            "ensemble_type": "three_seed_mean",
+            "seeds": [42, 123, 2024],
+            "history_days": HISTORY_DAYS,
+            "input_features": list(INPUT_FEATURES),
+            "input_channels": INPUT_CHANNELS,
+            "input_tile_size": INPUT_WIDTH,
+            "output_channels": OUTPUT_CHANNELS,
+            "output_tile_size": OUTPUT_WIDTH,
+            "grid_resolution_deg": settings.grid_resolution_deg,
+            "depths_m": list(DEPTHS_M),
+            "normalization_source": "data/processed/ML/ml_config.json",
+            "model_loaded": self.loaded,
+        }
 
 
 model = OceanEmbedModel()
