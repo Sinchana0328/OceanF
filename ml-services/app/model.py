@@ -1,11 +1,37 @@
 import logging
-import math
+import sys
+from pathlib import Path
 from typing import List
+
+import numpy as np
+import torch
 
 from app.config import settings
 from app.schemas import DepthPrediction, PredictionRequest
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.inference.oceanembed_inference import DEPTHS_M, OceanEmbedEnsemble
+
 logger = logging.getLogger("oceanembed.model")
+
+FEATURE_NAMES = (
+    "sst",
+    "sss",
+    "sla",
+    "uo",
+    "vo",
+    "u_wind",
+    "v_wind",
+)
+
+HISTORY_DAYS = 7
+INPUT_SIZE = 64
+INPUT_CHANNELS = HISTORY_DAYS * len(FEATURE_NAMES)
+OUTPUT_CHANNELS = 15
+OUTPUT_SIZE = 32
 
 
 class OceanEmbedModel:
@@ -18,67 +44,82 @@ class OceanEmbedModel:
       - A Deep Learning Method for Inversing 3D Temperature Fields Using Sea Surface
         Data in Offshore China and the Northwest Pacific Ocean (MDPI JMSE 12(12):2337)
 
-    Model contract:
-      INPUT  -> lat, lon, date, surface variables (SST, SSS, SSH/SLA, wind) on a
-                0.25 deg x 0.25 deg daily grid
-      OUTPUT -> predicted subsurface temperature at requested depth levels
-
-    Training data is GLORYS reanalysis; ARGO float profiles are used purely for
-    independent validation and are never mixed into training, to avoid leakage.
-
-    This class is the ONLY place that should be touched to plug in the real
-    trained PyTorch model. Everything above/below it (FastAPI routes, Spring
-    Boot orchestration) is agnostic to how predict() is implemented.
+        This wrapper owns service integration only. OceanEmbedEnsemble owns the
+        model architecture, normalization, checkpoint loading, and inference.
     """
 
     def __init__(self):
         self.model_version = settings.model_version
         self.loaded = False
-        self._torch_model = None
+        self._ensemble: OceanEmbedEnsemble | None = None
 
     def load(self) -> None:
-        """
-        Load model weights. Currently runs in stub mode (physically-plausible
-        synthetic profile) since no trained weights are present. Swap in:
-
-            import torch
-            self._torch_model = torch.load(settings.model_weights_path, map_location="cpu")
-            self._torch_model.eval()
-
-        and self.loaded = True once the file exists.
-        """
         try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._ensemble = OceanEmbedEnsemble(device=device)
             self.loaded = True
-            logger.info(
-                "OceanEmbed model '%s' ready (stub mode - no trained weights found, "
-                "using placeholder physical profile).", self.model_version
-            )
+            logger.info("OceanEmbed ensemble '%s' loaded on %s", self.model_version, device)
         except Exception as exc:
-            logger.error("Failed to load model weights: %s", exc)
+            logger.exception("Failed to load OceanEmbed checkpoints: %s", exc)
+            self._ensemble = None
             self.loaded = False
 
     def predict(self, request: PredictionRequest) -> List[DepthPrediction]:
-        if not self.loaded:
+        if not self.loaded or self._ensemble is None:
             raise RuntimeError("Model is not loaded")
 
-        sst = request.surface.sst
-        out: List[DepthPrediction] = []
-        for depth in request.depths:
-            temp = self._synthetic_profile(sst, depth, request.latitude)
-            uncertainty = round(0.15 + depth * 0.0005, 3)
-            out.append(DepthPrediction(depth_m=depth, temperature_c=round(temp, 3), uncertainty_c=uncertainty))
-        return out
+        feature_values = {
+            "sst": request.surface.sst,
+            "sss": request.surface.sss,
+            "sla": request.surface.ssh,
+            "uo": 0.0,
+            "vo": 0.0,
+            "u_wind": request.surface.wind_u or 0.0,
+            "v_wind": request.surface.wind_v or 0.0,
+        }
 
-    @staticmethod
-    def _synthetic_profile(sst: float, depth: int, latitude: float) -> float:
-        """
-        Placeholder ONLY: mimics thermocline decay (temperature falls off
-        roughly exponentially with depth toward a latitude-dependent deep
-        water temperature). Replace with real model inference.
-        """
-        deep_water_temp = 4.0 - 0.03 * abs(latitude)
-        decay_scale = 150.0
-        return deep_water_temp + (sst - deep_water_temp) * math.exp(-depth / decay_scale)
+        feature_arrays = {
+            feature: np.full(
+                (HISTORY_DAYS, INPUT_SIZE, INPUT_SIZE),
+                value,
+                dtype=np.float32,
+            )
+            for feature, value in feature_values.items()
+        }
+
+        prediction = self._ensemble.predict_from_raw_window(feature_arrays)
+        prediction_array = prediction.detach().cpu().numpy()
+        return [
+            DepthPrediction(
+                depth_m=depth,
+                temperature_c=round(
+                    float(prediction_array[depth_index, 16, 16]),
+                    3,
+                ),
+            )
+            for depth in request.depths
+            for depth_index, trained_depth in enumerate(DEPTHS_M)
+            if trained_depth == depth
+        ]
+
+    @torch.no_grad()
+    def predict_input(self, model_input: torch.Tensor | np.ndarray) -> np.ndarray:
+        """Run real inference for a normalized [49, 64, 64] input window."""
+        if not self.loaded or self._ensemble is None:
+            raise RuntimeError("Model is not loaded")
+
+        tensor = torch.as_tensor(model_input, dtype=torch.float32)
+        if tuple(tensor.shape) != (INPUT_CHANNELS, INPUT_SIZE, INPUT_SIZE):
+            raise ValueError(
+                f"Expected model input shape {(INPUT_CHANNELS, INPUT_SIZE, INPUT_SIZE)}, "
+                f"got {tuple(tensor.shape)}"
+            )
+
+        prediction = self._ensemble.predict_single(tensor)
+        result = prediction.detach().cpu().numpy()
+        if result.shape != (OUTPUT_CHANNELS, OUTPUT_SIZE, OUTPUT_SIZE):
+            raise RuntimeError(f"Unexpected prediction shape: {result.shape}")
+        return result
 
 
 model = OceanEmbedModel()
